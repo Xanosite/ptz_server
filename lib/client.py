@@ -1,110 +1,118 @@
 import ast
 import asyncio
 import logging
+from ptz_server import VERSION
 
 MAGIC = 'pr7d68j1'
 M_PORT = int(50201)
 
-class Handler:
+class Connection_manager:
     """
-    Client connection manager
+    con_man
+    Manages client connections
     """
-    active = False
-    hostname = None
     host = None
     port = None
-    serversock = None
-    status_mon = {}
-    clients = {}
+    serv = None
 
     def __init__(self, host: str, port: int=M_PORT) -> None:
-        """
-        host: ipv4 address of host system
-        """
-        self.clients = []
         self.host = host
         self.port = port
-        self.serv = None
-
-    async def listen_clients(self) -> None:
+    
+    async def listen(self) -> None:
         """
-        Listens for connections, spawns new clients on connect
+        Listen for clients
         """
-        async def new_client(reader: asyncio.StreamReader,
-                             writer: asyncio.StreamWriter) -> None:
-            """
-            Manage new client connections
-            """
-            client = Client(reader, writer, self)
-            self.clients.append(client)
-            await client.start()
-        # Start up server socket for listening
         self.serv = await asyncio.start_server(new_client, self.host, self.port)
-        logging.info(
-            f'Client listening server started at {self.host}:{self.port}'
-        )
-        
+        logging.info(f'Client server started on {self.host}:{self.port}')
+
     async def close(self) -> None:
         """
-        Graceful shutdown of client manager
+        Greaceful shutdown of client server
         """
-        logging.info("Client connection server stop command received")
-        logging.debug(f'Clients connected: {len(self.clients)}')
-        if len(self.clients) > 0:
-            for client in self.clients:
-                await client.close()
-        logging.debug(f'Clients connected: {len(self.clients)}')
+        logging.info('Client server shutdown command received')
         self.serv.close()
         await self.serv.wait_closed()
-        logging.info("Client connection server stopped")
+        logging.info('Client server shutdown complete, offline')
 
-class Client:
-    """
-    Client manager
-    """
-    def __init__(self, reader: asyncio.StreamReader,
-                 writer: asyncio.StreamWriter,
-                 handler: Handler) -> None:
-        self.reader = reader
-        self.writer = writer
-        self.status = {}
-        self.handler = handler
+    def get_clients(self) -> list:
+        """
+        Returns list of socket like objects currently connected
+        """
+        return [] if self.serv == None else self.serv.sockets
 
-    async def start(self) -> None:
-        await self.send_to_client(self.status)
-
-    async def close(self) -> None:
-        if self.writer.is_closing():
-            return None
-        else:
-            self.writer.close()
-            await self.writer.wait_closed()
-
-    async def send_to_client(self, data: dict) -> None:
-        b_data = bytes(str(data), 'utf-8')
-        self.writer.write(b_data)
-        await self.writer.drain()
-
-    async def receive_from_client(self) -> dict:
-        data = b''
-        while True:
-            chunk = await self.reader.read(100)
-            if chunk == b'': break
-            data += chunk
-        return ast.literal_eval(data.decode('utf-8'))
-        
-    async def parse_client_data(self, data: dict) -> None:
-        # Commands
-        if 'command' in data.keys():
-            match data['command']:
-                case 'dev_kit': await self.cmd_dev_kit(data)
-
-    async def com_shutdown(self, target: str) -> None:
-        match target:
-            case 'handler': self.handler.close()
-            case 'client': self.close()
+    def get_is_serving(self) -> bool:
+        """
+        Returns true if server is listening for connections
+        """
+        return False if self.serv is None else self.serv.is_serving()
     
-    async def cmd_dev_kit(self, data: dict) -> None:
-        match data['command']:
-            case 'disconnect_client': self.close()
-            case 'stop_client_server': self.handler.close()
+    def get_loop(self) -> asyncio.BaseEventLoop:
+        return None if self.serv is None else self.serv.get_loop()
+
+## Client functions
+async def client_handshake(reader: asyncio.StreamReader,
+                           writer: asyncio.StreamWriter, addr: str) -> bool:
+    """
+    Performs initial connection checks on client connection
+    Returns true if all checks pass
+    """
+    status = False
+    # Check if magic and version response from client matches server
+    init_data = {'version':VERSION,}
+    await send(writer, init_data)
+    client_response = await receive(reader, writer)
+    keys = ('version', 'magic')
+    if all(key in client_response.keys() for key in keys): status = (
+        client_response['version'] == VERSION
+        and client_response['magic'] == MAGIC
+    )
+    else: status = False
+    logging.debug(f'Handshake attempt with {addr} success?: {status}')
+    return status
+
+async def close(writer: asyncio.StreamWriter) -> None:
+    addr = writer.get_extra_info('peername')
+    writer.close()
+    await writer.wait_closed()
+    logging.info(f'Closed client {addr}')
+
+async def new_client(reader: asyncio.StreamReader,
+                     writer: asyncio.StreamWriter) -> None:
+    """
+    Take new client connection and begin operations
+    """
+    addr = writer.get_extra_info('peername')
+    logging.debug(f'New client connection atttempt from {addr}')
+    # Perform initial client checks
+    handshake = await client_handshake(reader, writer, addr)
+    if handshake:
+        logging.info(f'New client connected at {addr}')
+    else:
+        logging.warning(f'Connection attempt by {addr} failed handshake')
+        await close(writer)
+        return None
+    # Close client connection
+    await close(writer)
+
+async def receive(reader: asyncio.StreamReader, writer: asyncio.StreamWriter=None) -> dict:
+    paddr = None if writer == None else writer.get_extra_info('peername')
+    saddr = None if writer == None else writer.get_extra_info('sockname')
+    b_data = b''
+    while True:
+        chunk = await reader.read(1024)
+        if chunk == b'': break
+        else: b_data += chunk
+    data = ast.literal_eval(b_data.decode('utf-8'))
+    if writer == None: logging.debug(f'Received data: {data}')
+    else: logging.debug(f'Server {saddr} received data from {paddr}: {data}')
+    return data
+
+async def send(writer: asyncio.StreamWriter , data: dict) -> None:
+    paddr = writer.get_extra_info('peername')
+    saddr = writer.get_extra_info('sockname')
+    logging.debug(f'Server {saddr} sending data to {paddr}: {data}')
+    b_data = bytes(str(data), 'utf-8')
+    writer.write(b_data)
+    await writer.drain()
+    writer.write_eof()
