@@ -15,7 +15,7 @@ async def main() -> None:
         tg.create_task(con_man.listen())
 
 def init_logger(mdir):
-    fname = datetime.now().strftime('%Y-%m-%d') + '.log.'
+    fname = datetime.now().strftime('%Y-%m-%d') + '.log'
     logging.basicConfig(
         filename = pathlib.Path(mdir/'logs'/fname),
         level = logging.INFO,

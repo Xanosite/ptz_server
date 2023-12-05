@@ -25,6 +25,7 @@ class Connection_manager:
         """
         self.serv = await asyncio.start_server(new_client, self.host, self.port)
         logging.info(f'Client server started on {self.host}:{self.port}')
+        await self.serv.serve_forever()
 
     async def close(self) -> None:
         """
